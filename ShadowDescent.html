@@ -1,0 +1,1304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shadow Descent</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  overflow: hidden;
+  font-family: 'Courier New', monospace;
+}
+canvas {
+  display: block;
+  cursor: none;
+}
+#hint {
+  color: #223344;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  margin-top: 6px;
+  text-transform: uppercase;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">WASD / Arrows: Move &amp; Jump &nbsp;|&nbsp; S/↓: Slide &nbsp;|&nbsp; Z: Punch &nbsp;|&nbsp; X: Kick &nbsp;|&nbsp; Wall-Jump: Jump while against wall</div>
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  SHADOW DESCENT  ·  "Beneath the Surface"
+// ═══════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const BW = 800, BH = 450;
+
+(function resize() {
+  const s = Math.min(window.innerWidth / BW, (window.innerHeight - 28) / BH);
+  canvas.width  = BW;
+  canvas.height = BH;
+  canvas.style.width  = BW * s + 'px';
+  canvas.style.height = BH * s + 'px';
+})();
+window.addEventListener('resize', () => location.reload());
+
+// ── INPUT ────────────────────────────────────────────────────
+const K = {}, JP = {};
+window.addEventListener('keydown', e => { if (!K[e.code]) JP[e.code] = true; K[e.code] = true; e.preventDefault(); });
+window.addEventListener('keyup',   e => { K[e.code] = false; });
+const left  = () => K['ArrowLeft']  || K['KeyA'];
+const right = () => K['ArrowRight'] || K['KeyD'];
+const down  = () => K['ArrowDown']  || K['KeyS'];
+const jumpK = () => K['Space'] || K['ArrowUp'] || K['KeyW'];
+const punchK = () => JP['KeyZ'] || JP['KeyJ'];
+const kickK  = () => JP['KeyX'] || JP['KeyK'];
+
+// ── UTILS ───────────────────────────────────────────────────
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+function overlap(a, b) {
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+// ── SCREEN SHAKE ────────────────────────────────────────────
+let shk = 0, shkMag = 0;
+const shake = (m, d) => { shkMag = m; shk = d; };
+
+// ── PARTICLES ───────────────────────────────────────────────
+const PARTS = [];
+function part(x, y, vx, vy, col, sz, life) {
+  PARTS.push({ x, y, vx, vy, col, sz, life, ml: life });
+}
+function burst(x, y, col = '#ff6600', n = 10) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, Math.PI*2), s = rnd(2, 7);
+    part(x, y, Math.cos(a)*s, Math.sin(a)*s, col, rnd(2,4), rnd(18,36));
+  }
+}
+function dust(x, y) {
+  for (let i = 0; i < 3; i++)
+    part(x+rnd(-8,8), y, rnd(-1.5,1.5), rnd(-2.5,-0.5), '#556', rnd(2,3), rnd(12,20));
+}
+function tickParts() {
+  for (let i = PARTS.length-1; i >= 0; i--) {
+    const p = PARTS[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.vx *= 0.92; p.life--;
+    if (p.life <= 0) PARTS.splice(i, 1);
+  }
+}
+function drawParts(cx) {
+  PARTS.forEach(p => {
+    ctx.globalAlpha = p.life / p.ml;
+    ctx.fillStyle   = p.col;
+    ctx.beginPath();
+    ctx.arc(p.x - cx, p.y, p.sz * (p.life/p.ml), 0, Math.PI*2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ── PHYSICS HELPERS ─────────────────────────────────────────
+const GRAV = 0.52, MAXFALL = 16;
+let platforms = [];
+
+function resolveX(e, hb) {
+  e.onWall = 0;
+  for (const p of platforms) {
+    if (!overlap(hb, p)) continue;
+    if (e.vx > 0) { e.x = p.x - hb.w - (hb.x - e.x); e.onWall =  1; }
+    else           { e.x = p.x + p.w  - (hb.x - e.x); e.onWall = -1; }
+    e.vx = 0;
+  }
+}
+function resolveY(e, hb) {
+  e.onGround = false;
+  for (const p of platforms) {
+    if (!overlap(hb, p)) continue;
+    if (e.vy > 0) { e.y = p.y - hb.h - (hb.y - e.y); e.onGround = true; }
+    else           { e.y = p.y + p.h  - (hb.y - e.y); }
+    e.vy = 0;
+  }
+}
+function phys(e) {
+  if (!e.onGround) e.vy = Math.min(e.vy + GRAV, MAXFALL);
+  const hbX = () => ({ x: e.x + (e.slideH ? 4 : 0), y: e.y + (e.slideH ? e.h/2 : 0), w: e.w - (e.slideH ? 8 : 0), h: e.slideH ? e.h/2 : e.h });
+  e.x += e.vx; resolveX(e, hbX());
+  e.y += e.vy; resolveY(e, hbX());
+}
+
+// ── PLAYER ──────────────────────────────────────────────────
+const P = {
+  x: 80, y: 350, w: 26, h: 50,
+  vx: 0, vy: 0, facing: 1,
+  onGround: false, onWall: 0,
+  hp: 100, maxHp: 100,
+  lives: 3,
+  state: 'idle',   // idle run jump fall slide wallslide attack kick hurt dead
+  slideH: false,
+  atkTimer: 0, atkType: 'punch',
+  hurtTimer: 0, iframes: 0,
+  slideTimer: 0,
+  coyote: 0, jbuf: 0, jumps: 0,
+  anim: 0, af: 0,
+  _atkHit: new Set()
+};
+
+function hitPlayer(dmg) {
+  if (P.iframes > 0 || P.state === 'dead') return;
+  P.hp     -= dmg;
+  P.hurtTimer = 28;
+  P.iframes   = 40;
+  P.vy = -4;
+  shake(5, 10);
+  burst(P.x + P.w/2, P.y + P.h/3, '#ff2222', 8);
+}
+
+function tickPlayer() {
+  if (P.atkTimer  > 0) P.atkTimer--;
+  if (P.hurtTimer > 0) P.hurtTimer--;
+  if (P.slideTimer> 0) P.slideTimer--;
+  if (P.coyote    > 0) P.coyote--;
+  if (P.jbuf      > 0) P.jbuf--;
+  if (P.iframes   > 0) P.iframes--;
+
+  if (P.onGround) { P.coyote = 8; P.jumps = 0; }
+
+  if (JP['Space'] || JP['ArrowUp'] || JP['KeyW']) P.jbuf = 10;
+
+  const ctrl = P.hurtTimer === 0 && P.state !== 'dead';
+  const atk  = P.atkTimer  > 0;
+
+  if (ctrl) {
+    if (P.state !== 'slide' && P.state !== 'wallslide') {
+      if (right())      { P.vx = 5.5; P.facing =  1; }
+      else if (left())  { P.vx = -5.5; P.facing = -1; }
+      else              { P.vx *= 0.68; }
+    }
+
+    // Slide
+    if (P.onGround && !P.slideH && down() && (JP['ArrowDown'] || JP['KeyS']) && Math.abs(P.vx) > 1) {
+      P.state = 'slide'; P.slideH = true;
+      P.vx = P.facing * 9; P.slideTimer = 28;
+      dust(P.x + P.w/2, P.y + P.h);
+    }
+    if (P.slideH && P.slideTimer <= 0) { P.slideH = false; }
+
+    // Wall slide
+    if (!P.onGround && P.onWall !== 0) {
+      const push = (P.onWall === 1 && right()) || (P.onWall === -1 && left());
+      if (push) {
+        P.vy = Math.min(P.vy, 1.8);
+        P.state = 'wallslide';
+        P.facing = -P.onWall;
+      }
+    }
+
+    // Jump
+    if (P.jbuf > 0) {
+      if (P.coyote > 0) {
+        P.vy = -13; P.jbuf = 0; P.coyote = 0; P.jumps = 1;
+        if (P.slideH) { P.slideH = false; }
+        dust(P.x + P.w/2, P.y + P.h);
+      } else if (P.state === 'wallslide' || (P.onWall !== 0 && !P.onGround)) {
+        P.vy = -11; P.vx = -P.onWall * 9; P.facing = -P.onWall;
+        P.jbuf = 0; P.state = 'jump';
+        shake(2, 4);
+        dust(P.x + P.w/2, P.y + P.h/2);
+      } else if (P.jumps < 2) {
+        P.vy = -11 * 0.85; P.jumps++; P.jbuf = 0;
+        burst(P.x + P.w/2, P.y + P.h, '#4466ff', 5);
+      }
+    }
+
+    // Attacks
+    if (!atk) {
+      if (punchK()) { P.atkTimer = 20; P.atkType = 'punch'; P._atkHit.clear(); }
+      else if (kickK()) { P.atkTimer = 20; P.atkType = 'kick';  P._atkHit.clear(); }
+    }
+  }
+
+  phys(P);
+
+  // Derive state
+  if (P.state !== 'dead') {
+    if (P.hurtTimer > 0) { P.state = 'hurt'; }
+    else if (P.atkTimer > 0) { P.state = P.atkType === 'punch' ? 'attack' : 'kick'; }
+    else if (P.slideH) { P.state = 'slide'; }
+    else if (P.state === 'wallslide') { if (P.onGround || (!right() && !left())) { P.state = 'idle'; } }
+    else if (!P.onGround) { P.state = P.vy < 0 ? 'jump' : 'fall'; }
+    else { P.state = Math.abs(P.vx) > 0.5 ? 'run' : 'idle'; }
+  }
+
+  // Attack hit detection
+  if (P.atkTimer > 3 && P.atkTimer < 18) {
+    const ab = getAtkBox(P);
+    for (const e of allFoes()) {
+      if (e.hp <= 0) continue;
+      if (P._atkHit.has(e)) continue;
+      if (overlap(ab, foeHB(e))) {
+        const dmg = P.atkType === 'kick' ? 35 : 25;
+        hurtFoe(e, dmg, P.facing);
+        P._atkHit.add(e);
+      }
+    }
+  }
+
+  // Foe attacks hit player
+  for (const e of allFoes()) {
+    if (e.hp <= 0 || P.iframes > 0) continue;
+    const ab = foeAtkBox(e);
+    if (ab && overlap(ab, { x:P.x, y:P.y, w:P.w, h:P.h })) hitPlayer(e.isBoss ? 12 : 6);
+  }
+
+  // Camera
+  if (currentLevel === 0) {
+    targetCam = clamp(P.x - BW * 0.32, 0, 4100 - BW);
+    camX = lerp(camX, targetCam, 0.09);
+  } else { camX = 0; }
+
+  // Bounds
+  if (currentLevel !== 0) P.x = clamp(P.x, 22, BW - P.w - 22);
+
+  if (P.hp <= 0 && P.state !== 'dead') {
+    P.lives--;
+    shake(10, 25);
+    burst(P.x + P.w/2, P.y + P.h/2, '#ff2222', 20);
+    if (P.lives <= 0) {
+      P.state = 'dead';
+      setTimeout(() => setState('gameover'), 1500);
+    } else {
+      // Respawn on same level
+      P.state = 'hurt';
+      P.hp = P.maxHp;
+      P.hurtTimer = 60;
+      P.iframes = 90;
+      P.vx = 0; P.vy = -6;
+      // Respawn position per level
+      if (currentLevel === 0) { P.x = Math.max(80, P.x - 60); P.y = Math.min(P.y, 400); }
+      else if (currentLevel === 1) { P.x = 100; P.y = 370; }
+      else { P.x = 100; P.y = 370; }
+    }
+  }
+
+  // Level 0 exit
+  if (currentLevel === 0 && P.x > 3960) nextLevel('UNDERGROUND\nARENA AWAITS');
+
+  // Level 1 wave progress
+  if (currentLevel === 1 && enemies.length === 0 && waveDelay === 0) {
+    if (wave < 3) { wave++; waveDelay = 100; waveAnnounce = 150; }
+    else if (wave === 3) { wave = 99; nextLevel('FACE YOUR\nSHADOW SELF'); }
+  }
+  if (waveDelay > 0) { waveDelay--; if (waveDelay === 0) spawnWave(wave); }
+
+  // Level 2 boss dead
+  if (currentLevel === 2 && boss && boss.hp <= 0 && gameState === 'playing') {
+    setState('victory');
+  }
+
+  P.anim++;
+  if (P.anim > 5) { P.anim = 0; P.af++; }
+
+  // Bound P to a large level
+  if (P.y > BH + 120) hitPlayer(999);
+}
+
+function getAtkBox(e) {
+  const isKick = e.atkType === 'kick' || e === P && P.atkType === 'kick';
+  const reach = isKick ? 52 : 44;
+  const yOff  = isKick ? 24 : 12;
+  return {
+    x: e.facing > 0 ? e.x + e.w : e.x - reach,
+    y: e.y + yOff,
+    w: reach, h: isKick ? 22 : 26
+  };
+}
+
+// ── ENEMIES ─────────────────────────────────────────────────
+let enemies = [], boss = null;
+
+function mkEnemy(x, y, type) {
+  return {
+    x, y, w: 26, h: 50,
+    vx: 0, vy: 0, facing: -1,
+    onGround: false, onWall: 0, slideH: false,
+    hp: type === 'runner' ? 25 : 35, maxHp: type === 'runner' ? 25 : 35,
+    type, state: 'patrol',
+    atkTimer: 0, hurtTimer: 0, atkCD: 0,
+    patDir: 1, patDist: 0, patMax: rnd(50,110),
+    anim: Math.random() * 100,
+    eyeCol: type === 'runner' ? '#00ffff' : '#ff4400',
+    isBoss: false
+  };
+}
+
+function mkBoss(x, y) {
+  return {
+    x, y, w: 34, h: 60,
+    vx: 0, vy: 0, facing: -1,
+    onGround: false, onWall: 0, slideH: false,
+    hp: 180, maxHp: 180,
+    state: 'chase',
+    atkTimer: 0, hurtTimer: 0, atkCD: 0,
+    specialCD: 0, phase: 1, anim: 0,
+    eyeCol: '#ff0044', isBoss: true
+  };
+}
+
+function allFoes() { return boss ? [...enemies, boss] : enemies; }
+function foeHB(e)  { return { x:e.x, y:e.y, w:e.w, h:e.h }; }
+function foeAtkBox(e) {
+  if (e.atkTimer <= 6 || e.atkTimer > e.w+18) return null;
+  return {
+    x: e.facing > 0 ? e.x + e.w : e.x - 44,
+    y: e.y + 8, w: 44, h: e.h * 0.7
+  };
+}
+
+function hurtFoe(e, dmg, dir) {
+  e.hp -= dmg;
+  e.hurtTimer = 18; e.vx = dir * 4.5; e.vy = -3;
+  shake(3, 6);
+  burst(e.x + e.w/2, e.y + e.h/3, e.isBoss ? '#ff0088' : '#ff6600', e.isBoss ? 18 : 10);
+}
+
+function tickEnemies() {
+  for (let i = enemies.length-1; i >= 0; i--) {
+    const e = enemies[i];
+    tickFoe(e);
+    if (e.hp <= 0 && e.y > BH + 100) enemies.splice(i, 1);
+  }
+  if (boss) tickFoe(boss);
+}
+
+function tickFoe(e) {
+  if (e.atkCD  > 0) e.atkCD--;
+  if (e.atkTimer > 0) e.atkTimer--;
+
+  if (e.hp <= 0) {
+    e.vy += 0.4; e.x += e.vx; e.y += e.vy; e.vx *= 0.88;
+    return;
+  }
+
+  if (e.hurtTimer > 0) {
+    e.hurtTimer--;
+    phys(e);
+    return;
+  }
+
+  const dx = P.x - e.x, dy = P.y - e.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  e.facing = dx > 0 ? 1 : -1;
+
+  if (e.isBoss) {
+    // Phase 2
+    if (e.hp < e.maxHp * 0.5 && e.phase === 1) {
+      e.phase = 2; e.eyeCol = '#ff00cc';
+      shake(12, 35);
+      burst(e.x + e.w/2, e.y + e.h/2, '#ff00ff', 25);
+    }
+
+    e.specialCD++;
+    const specialInterval = e.phase === 2 ? 160 : 220;
+    if (e.specialCD >= specialInterval) {
+      e.specialCD = 0;
+      e.vx = e.facing * (e.phase === 2 ? 9 : 6);
+      e.vy = -7; e.atkTimer = 28; e.atkCD = 30;
+      shake(4, 6);
+    } else if (dist < 85 && e.atkCD === 0) {
+      e.atkTimer = 22; e.atkCD = 110;
+    } else {
+      e.vx = e.facing * (e.phase === 2 ? 2.2 : 1.5);
+    }
+  } else {
+    if (dist < 280) {
+      const range = e.type === 'runner' ? 300 : 72;
+      if (dist < range && e.atkCD === 0) {
+        if (e.type === 'runner') {
+          e.vx = e.facing * 9; e.vy = -6; e.atkTimer = 18; e.atkCD = 140;
+        } else {
+          e.vx = 0; e.atkTimer = 18; e.atkCD = 110;
+        }
+      } else if (dist >= range) {
+        e.vx = e.facing * (e.type === 'runner' ? 2.0 : 1.4);
+      } else { e.vx *= 0.75; }
+    } else {
+      e.vx = e.patDir * 0.8;
+      e.patDist += Math.abs(e.vx);
+      if (e.patDist > e.patMax) { e.patDir *= -1; e.patDist = 0; e.facing = e.patDir; }
+    }
+  }
+
+  phys(e);
+  if (e.y > BH + 80) { e.hp = 0; }
+}
+
+// ── LEVELS ──────────────────────────────────────────────────
+let currentLevel = 0, camX = 0, targetCam = 0;
+let wave = 1, waveDelay = 0, waveAnnounce = 0;
+let levelTimer = 0;
+
+function addP(x, y, w, h = 18) { platforms.push({ x, y, w, h }); }
+
+function buildLevel1() {
+  platforms = []; enemies = []; boss = null; PARTS.length = 0;
+
+  // Ground sections
+  addP(-60, 420, 280, 30);
+  addP( 290, 420, 160, 30);
+  addP( 530, 380, 100, 20);   // raised
+  addP( 720, 420, 120, 30);
+
+  addP( 920, 350, 90, 18);
+  addP(1080, 420, 190, 30);
+
+  // Low-ceiling slide zone
+  addP( 980, 325, 300, 14);   // ceiling
+  addP(1050, 420, 250, 30);   // floor under ceiling
+
+  addP(1360, 420, 120, 30);
+  addP(1560, 360, 90, 18);
+  addP(1720, 295, 90, 18);
+  addP(1870, 230, 90, 18);
+
+  addP(2020, 195, 200, 18);
+  // Wall jump section: two walls with a gap
+  addP(2220, 100, 18, 320);   // left wall
+  addP(2420, 100, 18, 320);   // right wall
+  addP(2180, 100, 260, 18);   // top ledge
+
+  addP(2500, 310, 120, 18);
+  addP(2690, 420, 90, 30);
+
+  // 2nd slide section
+  addP(2680, 315, 320, 14);   // ceiling
+  addP(2650, 420, 380, 30);
+
+  addP(3100, 390, 100, 18);
+  addP(3280, 330, 100, 18);
+  addP(3440, 265, 100, 18);
+
+  // Final run
+  addP(3580, 420, 500, 30);
+
+  // Safety net
+  addP(-100, 465, 4300, 10);
+
+  // Enemies — just 3, easy and spread out
+  enemies.push(mkEnemy(900, 330, 'runner'));
+  enemies.push(mkEnemy(2020, 370, 'fighter'));
+  enemies.push(mkEnemy(3300, 310, 'runner'));
+
+  P.x = 80; P.y = 390; P.vx = 0; P.vy = 0; P.hp = 100; P.lives = 3; P.state = 'idle';
+  P.iframes = 0; P.hurtTimer = 0; P.atkTimer = 0; P.slideH = false; P.jumps = 0;
+  camX = 0; targetCam = 0;
+}
+
+function buildLevel2() {
+  platforms = []; enemies = []; boss = null; PARTS.length = 0;
+
+  addP(0,   420, 800, 30);    // floor
+  addP(0,   0,   18, 450);    // left wall
+  addP(782, 0,   18, 450);    // right wall
+  addP(140, 295, 130, 16);
+  addP(530, 295, 130, 16);
+  addP(320, 210, 160, 16);
+
+  P.x = 80; P.y = 370; P.vx = 0; P.vy = 0; P.hp = P.maxHp; P.state = 'idle';
+  P.iframes = 120; P.hurtTimer = 0; P.atkTimer = 0; P.slideH = false; P.jumps = 0;
+  wave = 1; waveDelay = 90; waveAnnounce = 160; camX = 0;
+  enemies = [];
+}
+
+function spawnWave(w) {
+  enemies = [];
+  if (w === 1) {
+    enemies.push(mkEnemy(550, 370, 'runner'));
+    enemies.push(mkEnemy(640, 370, 'fighter'));
+  } else if (w === 2) {
+    enemies.push(mkEnemy(500, 370, 'fighter'));
+    enemies.push(mkEnemy(600, 370, 'runner'));
+    enemies.push(mkEnemy(690, 370, 'fighter'));
+  } else if (w === 3) {
+    for (let i = 0; i < 3; i++) {
+      const e = mkEnemy(480 + i*100, 370, 'fighter');
+      e.hp = e.maxHp = 45; enemies.push(e);
+    }
+  }
+}
+
+function buildLevel3() {
+  platforms = []; enemies = []; boss = null; PARTS.length = 0;
+
+  addP(0,   420, 900, 30);
+  addP(0,   0,   18, 450);
+  addP(882, 0,   18, 450);
+  addP(90,  275, 130, 16);
+  addP(680, 275, 130, 16);
+  addP(350, 190, 180, 16);
+
+  boss = mkBoss(680, 360);
+  P.x = 80; P.y = 370; P.vx = 0; P.vy = 0; P.hp = P.maxHp; P.state = 'idle';
+  P.iframes = 120; P.hurtTimer = 0; P.atkTimer = 0; P.slideH = false; P.jumps = 0;
+  camX = 0;
+}
+
+// ── GAME STATE ──────────────────────────────────────────────
+let gameState = 'menu';
+let transText = '', transTimer = 0;
+let frame = 0;
+
+function setState(s) { gameState = s; }
+function nextLevel(txt) {
+  if (gameState !== 'playing') return;
+  setState('transition');
+  transText = txt;
+  transTimer = 130;
+  setTimeout(() => {
+    const n = currentLevel + 1;
+    if (n === 1) { currentLevel = 1; buildLevel2(); setState('playing'); levelTimer = 0; }
+    else if (n === 2) { currentLevel = 2; buildLevel3(); setState('playing'); levelTimer = 0; }
+  }, 2200);
+}
+
+// ── DRAWING ─────────────────────────────────────────────────
+
+function drawBG() {
+  const t = frame;
+
+  // ── Sky / cave gradient changes per level ─────────────────
+  const palettes = [
+    // Level 0: deep tunnel — teal/indigo
+    ['#040d1c','#091830','#0d1f3c','#07122a'],
+    // Level 1: arena — orange magma under blue mist
+    ['#0d0815','#1a0820','#280a12','#100508'],
+    // Level 2: void mirror — deep violet
+    ['#07020f','#10041a','#1c0635','#080118'],
+  ];
+  const pal = palettes[Math.min(currentLevel, 2)];
+
+  const g = ctx.createLinearGradient(0, 0, 0, BH);
+  g.addColorStop(0,   pal[0]);
+  g.addColorStop(0.4, pal[1]);
+  g.addColorStop(0.75,pal[2]);
+  g.addColorStop(1,   pal[3]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, BW, BH);
+
+  // ── Distant cave walls (far parallax) ────────────────────
+  const wallCol = currentLevel===0 ? '#0d2a42' : currentLevel===1 ? '#2a0a14' : '#1a0530';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = wallCol;
+  // Left wall blob
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  for (let y = 0; y <= BH; y += 30) {
+    const wx = 28 + Math.sin(y*0.045 + camX*0.02)*18;
+    ctx.lineTo(wx, y);
+  }
+  ctx.lineTo(0, BH); ctx.closePath(); ctx.fill();
+  // Right wall blob
+  ctx.beginPath();
+  ctx.moveTo(BW, 0);
+  for (let y = 0; y <= BH; y += 30) {
+    const wx = BW - 28 - Math.sin(y*0.045 + 2.1 + camX*0.02)*18;
+    ctx.lineTo(wx, y);
+  }
+  ctx.lineTo(BW, BH); ctx.closePath(); ctx.fill();
+
+  // ── Glowing rock formations (mid parallax) ───────────────
+  const rockGlow = currentLevel===0 ? '#1a5c8c' : currentLevel===1 ? '#8c2a00' : '#6600aa';
+  const rockBase = currentLevel===0 ? '#0a2a3f' : currentLevel===1 ? '#3f0f00' : '#200040';
+  for (let i = 0; i < 9; i++) {
+    const ox = ((i * 240 - camX * 0.3) % (BW+240) + BW+240) % (BW+240) - 60;
+    const oy = 330 + Math.sin(i*1.9)*50;
+    const rw = 70 + i*12, rh = 55 + Math.sin(i*2.2)*20;
+    // Glow halo
+    const rg = ctx.createRadialGradient(ox, oy, 0, ox, oy, rw);
+    rg.addColorStop(0, rockGlow + '44');
+    rg.addColorStop(1, 'transparent');
+    ctx.fillStyle = rg; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.ellipse(ox, oy, rw, rh, 0, 0, Math.PI*2); ctx.fill();
+    // Rock body
+    ctx.fillStyle = rockBase; ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.ellipse(ox, oy+10, rw*0.7, rh*0.7, 0, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ── Stalactites with dripping glow ───────────────────────
+  const dripCol = currentLevel===0 ? '#00d4ff' : currentLevel===1 ? '#ff6600' : '#cc00ff';
+  for (let i = 0; i < 14; i++) {
+    const sx = ((i * 140 - camX * 0.5) % (BW+140) + BW+140) % (BW+140) - 20;
+    const sh = 35 + Math.sin(i*2.5)*22;
+    const sw = 9 + Math.sin(i*1.3)*4;
+    // Stone body
+    const sg = ctx.createLinearGradient(sx, 0, sx, sh);
+    sg.addColorStop(0, currentLevel===0?'#1a3d55':currentLevel===1?'#3d1500':'#2a004d');
+    sg.addColorStop(1, dripCol+'88');
+    ctx.fillStyle = sg; ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.moveTo(sx - sw, 0); ctx.lineTo(sx + sw, 0);
+    ctx.lineTo(sx + 2, sh); ctx.lineTo(sx - 2, sh);
+    ctx.closePath(); ctx.fill();
+    // Drip drop
+    const dropPulse = Math.abs(Math.sin(t*0.07 + i*0.8));
+    ctx.globalAlpha = 0.7 * dropPulse;
+    ctx.fillStyle = dripCol;
+    ctx.shadowColor = dripCol; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.arc(sx, sh + 6*dropPulse, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Stalagmites from floor ────────────────────────────────
+  for (let i = 0; i < 10; i++) {
+    const sx = ((i * 180 + 90 - camX * 0.6) % (BW+180) + BW+180) % (BW+180) - 20;
+    const sh = 25 + Math.sin(i*3.1)*15;
+    const sg = ctx.createLinearGradient(sx, BH-sh, sx, BH);
+    sg.addColorStop(0, dripCol + '66');
+    sg.addColorStop(1, currentLevel===0?'#0f2030':currentLevel===1?'#300a00':'#180028');
+    ctx.fillStyle = sg; ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(sx-6, BH); ctx.lineTo(sx+6, BH);
+    ctx.lineTo(sx+1, BH-sh); ctx.lineTo(sx-1, BH-sh);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // ── Glowing pipes / tunnel architecture (level 0 & 1) ───
+  if (currentLevel < 2) {
+    const pipeCol = currentLevel===0 ? '#00aaff' : '#ff4400';
+    for (let i = 0; i < 5; i++) {
+      const px = ((i * 310 + 60 - camX * 0.7) % (BW+310) + BW+310) % (BW+310) - 40;
+      const py = 80 + i * 40;
+      ctx.globalAlpha = 0.18;
+      ctx.strokeStyle = pipeCol; ctx.lineWidth = 4;
+      ctx.shadowColor = pipeCol; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + 120, py); ctx.stroke();
+      // Rivet dots
+      ctx.fillStyle = pipeCol; ctx.globalAlpha = 0.3;
+      for (let r = 0; r < 3; r++) {
+        ctx.beginPath(); ctx.arc(px + 20 + r*40, py, 3, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+    }
+  }
+
+  // ── Floating dust / embers ────────────────────────────────
+  const emberCol = currentLevel===0 ? '#44bbff' : currentLevel===1 ? '#ff8844' : '#cc44ff';
+  for (let i = 0; i < 18; i++) {
+    const ex = (Math.sin(t*0.003 + i*2.3)*0.5 + 0.5) * BW;
+    const ey = (Math.cos(t*0.005 + i*1.8)*0.5 + 0.5) * BH;
+    const er = 1.2 + Math.sin(t*0.012+i)*0.8;
+    ctx.globalAlpha = 0.25 + Math.sin(t*0.011+i)*0.15;
+    ctx.fillStyle = emberCol;
+    ctx.shadowColor = emberCol; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(ex, ey, er, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Ground fog layer ────────────────────────────────────
+  const fogG = ctx.createLinearGradient(0, 360, 0, BH);
+  const fogCol = currentLevel===0 ? 'rgba(0,80,160,' : currentLevel===1 ? 'rgba(120,30,0,' : 'rgba(60,0,100,';
+  fogG.addColorStop(0, fogCol+'0)');
+  fogG.addColorStop(0.5, fogCol+'0.12)');
+  fogG.addColorStop(1, fogCol+'0.25)');
+  ctx.fillStyle = fogG; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 360, BW, BH-360);
+
+  ctx.globalAlpha = 1;
+}
+
+function drawPlatforms() {
+  const edgeCols = ['#00ccff','#ff6600','#cc44ff'];
+  const topFills = [['#0d2a44','#071422'],['#3a1000','#1a0800'],['#200040','#0d0020']];
+  const ec = edgeCols[Math.min(currentLevel,2)];
+  const tf = topFills[Math.min(currentLevel,2)];
+  for (const p of platforms) {
+    const sx = p.x - camX;
+    if (sx > BW+20 || sx+p.w < -20) continue;
+    const g = ctx.createLinearGradient(0, p.y, 0, p.y+p.h);
+    g.addColorStop(0, tf[0]); g.addColorStop(1, tf[1]);
+    ctx.fillStyle = g; ctx.fillRect(sx, p.y, p.w, p.h);
+    ctx.strokeStyle = ec + '44'; ctx.lineWidth = 1;
+    ctx.strokeRect(sx, p.y, p.w, p.h);
+    ctx.shadowColor = ec; ctx.shadowBlur = 8;
+    ctx.strokeStyle = ec; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(sx, p.y); ctx.lineTo(sx+p.w, p.y); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = ec + 'bb';
+    [sx+3, sx+p.w-6].forEach(bx => ctx.fillRect(bx, p.y+2, 4, 4));
+  }
+}
+
+// Draw a stylised figure — isVector=true uses Vector's colorful outfit
+function drawFig(e, eyeCol, isRunning, isAttacking, isKicking, isHurt, isSlide, isWall, isVector) {
+  const cx = e.x - camX + e.w/2;
+  const bot = e.y + e.h;
+  const t  = e.anim || frame;
+  const f  = e.facing;
+  const bw = e.w * 0.55;
+  const headR = e.w * 0.36;
+  const H = e.h;
+
+  ctx.save();
+  ctx.translate(cx, bot);
+
+  let lean = 0;
+  if (isRunning)   lean = f * 0.18;
+  if (isAttacking) lean = f * 0.28;
+  if (isHurt)      lean = -f * 0.35;
+  if (isWall)      lean = f * -0.4;
+  ctx.rotate(lean);
+
+  // ── VECTOR (player) full-colour outfit ─────────────────
+  if (isVector) {
+    // ─ Slide pose ─
+    if (isSlide) {
+      // Torso
+      ctx.fillStyle = '#cc2200'; ctx.fillRect(-e.w/2, -H*0.32, e.w*0.65, H*0.32);
+      // Legs
+      ctx.fillStyle = '#111122'; ctx.fillRect(-e.w/2+2, -H*0.18, e.w*0.6, H*0.2);
+      // Shoes
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(-e.w/2+2, -H*0.09, e.w*0.35, H*0.1);
+      // Head
+      ctx.fillStyle = '#e8b87a'; ctx.beginPath(); ctx.arc(f*e.w*0.22, -H*0.38, headR*0.9, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#cc2200'; ctx.beginPath(); ctx.arc(f*e.w*0.22, -H*0.38, headR*0.7, 0, Math.PI, true); ctx.fill(); // cap top
+      glowEye(f*e.w*0.22 + f*headR*0.4, -H*0.38, '#ffffff');
+      ctx.restore(); return;
+    }
+
+    const run = Math.sin(t*0.55);
+    const legSwing = isRunning ? run*22 : (isAttacking ? -12 : (isKicking ? 28*f : 0));
+    const armSwing = isRunning ? -run*20 : (isAttacking ? f*-75 : (isKicking ? -12 : 0));
+
+    // --- Legs (pants dark blue) ---
+    const legW = 8;
+    ctx.fillStyle = '#111133';
+    // Left leg
+    ctx.save(); ctx.translate(-e.w*0.14, -H*0.28);
+    ctx.rotate((legSwing-5)*Math.PI/180);
+    ctx.fillRect(-legW/2, 0, legW, H*0.38);
+    // Shoe left
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(-legW/2-1, H*0.36, legW+4, H*0.07);
+    ctx.restore();
+    // Right leg
+    ctx.fillStyle = '#111133';
+    ctx.save(); ctx.translate(e.w*0.14, -H*0.28);
+    ctx.rotate((-legSwing+5)*Math.PI/180);
+    ctx.fillRect(-legW/2, 0, legW, H*0.38);
+    // Shoe right
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(-legW/2-1, H*0.36, legW+4, H*0.07);
+    ctx.restore();
+
+    // --- Torso (red jacket) ---
+    const jacketG = ctx.createLinearGradient(-bw/2, -H*0.7, bw/2, -H*0.28);
+    jacketG.addColorStop(0, '#dd2200');
+    jacketG.addColorStop(0.4, '#ff3300');
+    jacketG.addColorStop(1, '#aa1a00');
+    ctx.fillStyle = jacketG;
+    ctx.fillRect(-bw/2, -H*0.7, bw, H*0.44);
+    // White chest stripe
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-3, -H*0.68, 6, H*0.36);
+    // Jacket collar
+    ctx.fillStyle = '#ff4422';
+    ctx.beginPath();
+    ctx.moveTo(-6, -H*0.7); ctx.lineTo(0, -H*0.65); ctx.lineTo(6, -H*0.7);
+    ctx.closePath(); ctx.fill();
+
+    // --- Arms ---
+    const armW = 7;
+    // Left arm (red sleeve)
+    ctx.save(); ctx.translate(-bw/2, -H*0.65);
+    ctx.rotate((armSwing-15)*Math.PI/180);
+    ctx.fillStyle = '#cc1a00'; ctx.fillRect(-armW/2, 0, armW, H*0.22);
+    // Glove left (dark)
+    ctx.fillStyle = '#222'; ctx.fillRect(-armW/2-1, H*0.22, armW+2, H*0.1);
+    // Fist left
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(0, H*0.32, 4.5, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.restore();
+    // Right arm
+    ctx.save(); ctx.translate(bw/2, -H*0.65);
+    ctx.rotate((-armSwing+15)*Math.PI/180);
+    if (isAttacking) {
+      ctx.shadowColor = '#ff8800'; ctx.shadowBlur = 24;
+      ctx.fillStyle = '#ff9900'; // glowing punch arm
+    } else {
+      ctx.fillStyle = '#cc1a00';
+    }
+    ctx.fillRect(-armW/2, 0, armW, H*0.22);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#222'; ctx.fillRect(-armW/2-1, H*0.22, armW+2, H*0.1);
+    // Fist right
+    if (isAttacking) {
+      ctx.shadowColor = '#ff8800'; ctx.shadowBlur = 20;
+      ctx.fillStyle = '#ff9900';
+    } else {
+      ctx.fillStyle = '#333';
+    }
+    ctx.beginPath(); ctx.arc(0, H*0.32, 4.5, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.restore();
+
+    // Kick trail
+    if (isKicking) {
+      ctx.save();
+      ctx.translate(f*e.w*0.14, -H*0.18);
+      ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 22;
+      ctx.fillStyle = '#ff7700';
+      ctx.fillRect(-legW/2, 0, legW, H*0.28);
+      ctx.shadowBlur = 0; ctx.restore();
+    }
+
+    // --- Head (skin + red cap) ---
+    // Skin
+    ctx.fillStyle = '#e8b87a';
+    ctx.beginPath(); ctx.arc(0, -H*0.84, headR, 0, Math.PI*2); ctx.fill();
+    // Red cap
+    ctx.fillStyle = '#cc1100';
+    ctx.beginPath(); ctx.arc(0, -H*0.84, headR, Math.PI, 0); ctx.fill();
+    ctx.fillRect(-headR, -H*0.84-2, headR*2, headR*0.3);
+    // Cap brim
+    ctx.fillStyle = '#aa0000';
+    ctx.fillRect(-headR*1.3 * (f > 0 ? 0 : 1) - (f > 0 ? 0 : headR*0.3), -H*0.84 + headR*0.05, headR*1.6, headR*0.22);
+    // Visor shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(f*headR*0.1, -H*0.84 + headR*0.05, f*headR*0.9, headR*0.22);
+    // Eye
+    glowEye(f * headR*0.48, -H*0.84 + headR*0.08, '#ffffff');
+
+    ctx.restore(); return;
+  }
+
+  // ── ENEMY / BOSS: dark silhouette ──────────────────────
+  ctx.fillStyle = '#050508';
+  ctx.strokeStyle = '#050508';
+
+  if (isSlide) {
+    ctx.fillRect(-e.w/2, -H*0.32, e.w, H*0.32);
+    ctx.beginPath(); ctx.arc(f * e.w*0.2, -H*0.38, headR*0.9, 0, Math.PI*2); ctx.fill();
+    glowEye(f * e.w*0.2 + f*headR*0.4, -H*0.38, eyeCol);
+    ctx.restore(); return;
+  }
+
+  ctx.fillRect(-bw/2, -H*0.7, bw, H*0.42);
+  ctx.beginPath(); ctx.arc(0, -H*0.84, headR, 0, Math.PI*2); ctx.fill();
+
+  const legSwing = isRunning ? Math.sin(t*0.55)*20 : (isAttacking ? -10 : (isKicking ? 25*f : 0));
+  ctx.save(); ctx.translate(-e.w*0.15, -H*0.28);
+  ctx.rotate((legSwing-5)*Math.PI/180);
+  ctx.fillRect(-4.5, 0, 9, H*0.42); ctx.restore();
+  ctx.save(); ctx.translate(e.w*0.15, -H*0.28);
+  ctx.rotate((-legSwing+5)*Math.PI/180);
+  ctx.fillRect(-4.5, 0, 9, H*0.42); ctx.restore();
+
+  const armSwing = isRunning ? -Math.sin(t*0.55)*18 : (isAttacking ? f*-70 : (isKicking ? -10 : 0));
+  ctx.save(); ctx.translate(-bw/2, -H*0.62);
+  ctx.rotate((armSwing-15)*Math.PI/180);
+  ctx.fillRect(-3.5, 0, 7, H*0.3);
+  // Enemy fist left
+  ctx.beginPath(); ctx.arc(0, H*0.3, 4, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.translate(bw/2, -H*0.62);
+  ctx.rotate((-armSwing+15)*Math.PI/180);
+  if (isAttacking) { ctx.shadowColor = eyeCol; ctx.shadowBlur = 18; ctx.fillStyle = eyeCol; }
+  ctx.fillRect(-3.5, 0, 7, H*0.3);
+  // Enemy fist right
+  if (isAttacking) { ctx.shadowColor = eyeCol; ctx.shadowBlur = 18; ctx.fillStyle = eyeCol; }
+  ctx.beginPath(); ctx.arc(0, H*0.3, 4, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = '#050508'; ctx.restore();
+
+  if (isKicking) {
+    ctx.save(); ctx.translate(f*e.w*0.15, -H*0.18);
+    ctx.shadowColor = eyeCol; ctx.shadowBlur = 18; ctx.fillStyle = eyeCol;
+    ctx.fillRect(-4, 0, 8, H*0.3); ctx.shadowBlur = 0; ctx.restore();
+  }
+
+  // Fog/smoke outline on enemy
+  ctx.shadowColor = eyeCol + '66'; ctx.shadowBlur = 12;
+  ctx.strokeStyle = '#050508'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.arc(0, -H*0.84, headR, 0, Math.PI*2); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  glowEye(f * headR*0.45, -H*0.84, eyeCol);
+  ctx.restore();
+}
+
+function glowEye(x, y, col) {
+  ctx.save();
+  ctx.shadowColor = col; ctx.shadowBlur = 14;
+  ctx.fillStyle   = col;
+  ctx.fillRect(x - 4, y - 2.5, 9, 5);
+  ctx.shadowBlur = 0; ctx.restore();
+}
+
+function drawPlayer() {
+  if (P.iframes > 0 && Math.floor(P.iframes/4)%2===1) return;
+  const p = P;
+
+  // Attack range indicator
+  if (p.atkTimer > 3 && p.atkTimer < 18) {
+    const ab = getAtkBox(p);
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#ff6600';
+    ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 12;
+    ctx.fillRect(ab.x - camX, ab.y, ab.w, ab.h);
+    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  }
+
+  const s  = p.state;
+  const ec = (s==='attack'||s==='kick') ? '#ff9900' : '#00ffee';
+  drawFig(
+    { ...p, anim: p.af },
+    ec,
+    s==='run', s==='attack', s==='kick', s==='hurt', p.slideH, s==='wallslide', true
+  );
+}
+
+function drawEnemy(e) {
+  const sx = e.x - camX;
+  if (sx < -80 || sx > BW+80) return;
+  if (e.hp <= 0) {
+    ctx.globalAlpha = Math.max(0, (e.hp + 30) / 30);
+  }
+  const s  = e.state;
+  drawFig(e, e.eyeCol, s==='chase', s==='attack', false, e.hurtTimer>0, false, false, false);
+  ctx.globalAlpha = 1;
+
+  // Small HP bar
+  if (e.hp > 0 && e.hp < e.maxHp) {
+    const bw = 28, bx = e.x - camX, by = e.y - 10;
+    ctx.fillStyle = '#300'; ctx.fillRect(bx, by, bw, 4);
+    ctx.fillStyle = '#f44';
+    ctx.fillRect(bx, by, bw * clamp(e.hp/e.maxHp, 0, 1), 4);
+  }
+}
+
+function drawBoss() {
+  if (!boss) return;
+  const b = boss;
+
+  // Aura
+  const auraCol = b.eyeCol;
+  ctx.globalAlpha = 0.1 + Math.sin(frame*0.12)*0.04;
+  ctx.shadowColor = auraCol; ctx.shadowBlur = 50;
+  ctx.fillStyle   = auraCol;
+  ctx.beginPath();
+  ctx.ellipse(b.x - camX + b.w/2, b.y + b.h*0.5, b.w*2, b.h*1.3, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+
+  drawFig(
+    { ...b, anim: frame },
+    auraCol,
+    true, b.atkTimer > 5, false, b.hurtTimer > 0, false, false, false
+  );
+
+  // Boss HP bar
+  const bw = 380, bx = BW/2 - bw/2, by = 18;
+  ctx.fillStyle = '#1a0010';
+  ctx.fillRect(bx, by, bw, 14);
+  const hpPct = clamp(b.hp / b.maxHp, 0, 1);
+  const bg = ctx.createLinearGradient(bx, 0, bx+bw, 0);
+  bg.addColorStop(0, '#cc0033'); bg.addColorStop(0.5, '#ff0088'); bg.addColorStop(1, '#9900ff');
+  ctx.fillStyle = bg;
+  ctx.shadowColor = '#ff0080'; ctx.shadowBlur = 10;
+  ctx.fillRect(bx, by, bw * hpPct, 14);
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ff0066'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(bx, by, bw, 14);
+  ctx.fillStyle = '#ff88cc'; ctx.font = 'bold 10px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText('⟨ YOUR SHADOW SELF ⟩', BW/2, by - 4);
+  ctx.textAlign = 'left';
+}
+
+// Level 1 exit portal
+function drawPortal() {
+  if (currentLevel !== 0) return;
+  const x = 3960 - camX, y = 360;
+  const t = frame;
+  ctx.save();
+  ctx.shadowColor = '#8800ff'; ctx.shadowBlur = 30;
+  ctx.strokeStyle = '#aa44ff'; ctx.lineWidth = 3;
+  for (let r = 20; r <= 50; r += 15) {
+    ctx.globalAlpha = 0.4 + Math.sin(t*0.08 + r)*0.3;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
+  }
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = '#6600cc';
+  ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1; ctx.restore();
+}
+
+function drawHUD() {
+  // Player HP
+  const hbW = 140, hbX = 18, hbY = 18;
+  ctx.fillStyle = '#080018';
+  ctx.fillRect(hbX, hbY, hbW, 11);
+  const pct = clamp(P.hp / P.maxHp, 0, 1);
+  const hcol = pct > 0.5 ? '#00ff88' : pct > 0.25 ? '#ffaa00' : '#ff2244';
+  ctx.fillStyle = hcol; ctx.shadowColor = hcol; ctx.shadowBlur = 8;
+  ctx.fillRect(hbX, hbY, hbW * pct, 11);
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#003328'; ctx.lineWidth = 1;
+  ctx.strokeRect(hbX, hbY, hbW, 11);
+  ctx.fillStyle = '#88ffcc'; ctx.font = 'bold 9px "Courier New"';
+  ctx.fillText('HP', hbX + 2, hbY - 3);
+
+  // Lives (hearts)
+  ctx.font = '14px serif';
+  for (let i = 0; i < 3; i++) {
+    ctx.globalAlpha = i < P.lives ? 1 : 0.18;
+    ctx.shadowColor = '#ff2244'; ctx.shadowBlur = i < P.lives ? 8 : 0;
+    ctx.fillStyle = i < P.lives ? '#ff2244' : '#442233';
+    ctx.fillText('♥', hbX + i * 20, hbY + 30);
+  }
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+
+  // Level name
+  const names = ['PARKOUR ESCAPE', 'UNDERGROUND ARENA', 'BOSS FIGHT'];
+  ctx.fillStyle = 'rgba(0,20,40,0.55)';
+  ctx.fillRect(BW/2 - 75, 8, 150, 16);
+  ctx.fillStyle = '#4499ff'; ctx.font = 'bold 9px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText(names[currentLevel], BW/2, 20);
+  ctx.textAlign = 'left';
+
+  // Wave counter for arena
+  if (currentLevel === 1 && wave <= 3) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#aaaaff'; ctx.font = 'bold 10px "Courier New"';
+    ctx.fillText(`WAVE ${wave} / 3`, BW - 18, 24);
+    ctx.textAlign = 'left';
+  }
+
+  // Wave announce banner
+  if (waveAnnounce > 0 && currentLevel === 1) {
+    waveAnnounce--;
+    const a = waveAnnounce > 90 ? 1 : waveAnnounce / 90;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(0,0,20,0.7)';
+    ctx.fillRect(BW/2 - 120, BH/2 - 24, 240, 42);
+    ctx.fillStyle = '#6688ff'; ctx.font = 'bold 18px "Courier New"';
+    ctx.textAlign = 'center';
+    ctx.fillText(`— WAVE ${wave} —`, BW/2, BH/2 + 4);
+    ctx.textAlign = 'left'; ctx.globalAlpha = 1;
+  }
+
+  // Controls tip
+  if (levelTimer < 210) {
+    const a = levelTimer < 160 ? 1 : (210-levelTimer)/50;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(BW/2 - 200, BH - 36, 400, 22);
+    ctx.fillStyle = '#446688'; ctx.font = '9px "Courier New"';
+    ctx.textAlign = 'center';
+    const tips = [
+      'A/D: Move · Space/W: Jump · S: Slide (while running) · Z: Punch · X: Kick · Wall-Jump: jump while touching wall',
+      'Defeat all enemies to advance — combo punches and kicks for max damage',
+      'Z: Punch · X: Kick · Dodge attacks! Your Shadow Self mirrors your style'
+    ];
+    ctx.fillText(tips[currentLevel], BW/2, BH - 21);
+    ctx.textAlign = 'left'; ctx.globalAlpha = 1;
+  }
+}
+
+function drawMenu() {
+  const t = frame;
+
+  // BG — deep underground cave
+  const mg = ctx.createLinearGradient(0, 0, 0, BH);
+  mg.addColorStop(0,   '#040d1c');
+  mg.addColorStop(0.5, '#091830');
+  mg.addColorStop(1,   '#050d22');
+  ctx.fillStyle = mg; ctx.fillRect(0, 0, BW, BH);
+
+  // Cave stalactites
+  for (let i = 0; i < 12; i++) {
+    const sx = (i * 145 + t*0.15) % (BW + 80) - 20;
+    const sh = 30 + Math.sin(i*2.1)*18;
+    const sg = ctx.createLinearGradient(sx, 0, sx, sh);
+    sg.addColorStop(0, '#0d2a42'); sg.addColorStop(1, '#00aaff66');
+    ctx.fillStyle = sg; ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.moveTo(sx-7,0); ctx.lineTo(sx+7,0); ctx.lineTo(sx+2,sh); ctx.lineTo(sx-2,sh); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#00ccff'; ctx.globalAlpha=0.3*Math.abs(Math.sin(t*0.06+i));
+    ctx.shadowColor='#00ccff'; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.arc(sx,sh+4*Math.abs(Math.sin(t*0.06+i)),2,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
+  }
+
+  // Ambient parallax rocks
+  ctx.globalAlpha = 0.12;
+  ctx.fillStyle = '#0a1d30';
+  for (let i = 0; i < 8; i++) {
+    ctx.beginPath();
+    ctx.arc((i*150 + t*0.2)%(BW+100)-50, 380+Math.sin(i*1.4)*40, 70+i*10, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Moving Vector runner (colorful preview on menu)
+  const rx = (t * 2.5) % (BW + 120) - 60;
+  ctx.globalAlpha = 0.22;
+  drawFig({ x: rx, y: 360, w: 26, h: 50, facing: 1, anim: t }, '#ffffff', true, false, false, false, false, false, true);
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#1144ff'; ctx.shadowBlur = 50;
+  ctx.fillStyle   = '#2255ff';
+  ctx.font = 'bold 78px "Courier New"';
+  ctx.fillText('SHADOW', BW/2, 155);
+
+  ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 25;
+  ctx.fillStyle   = '#eeeeff';
+  ctx.fillText('DESCENT', BW/2, 245);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#222840'; ctx.font = '13px "Courier New"';
+  ctx.fillText('BENEATH  THE  SURFACE', BW/2, 278);
+
+  // Pulsing start
+  const pa = 0.55 + Math.sin(t*0.1)*0.45;
+  ctx.globalAlpha = pa;
+  ctx.fillStyle = '#00ffcc'; ctx.font = 'bold 15px "Courier New"';
+  ctx.fillText('[ PRESS SPACE TO DESCEND ]', BW/2, 335);
+  ctx.globalAlpha = 1;
+
+  // Controls
+  ctx.fillStyle = '#1a2433'; ctx.font = '10px "Courier New"';
+  ctx.fillText('WASD / ARROWS: Move · Space/W: Jump · S: Slide · Z: Punch · X: Kick', BW/2, 400);
+  ctx.fillText('Wall-Jump: Press jump while touching a vertical wall', BW/2, 418);
+  ctx.textAlign = 'left';
+}
+
+function drawTransition() {
+  const prog = 1 - transTimer / 130;
+  transTimer--;
+  ctx.fillStyle = `rgba(0,0,0,${Math.min(prog * 3, 0.9)})`;
+  ctx.fillRect(0, 0, BW, BH);
+  if (prog > 0.4) {
+    const alpha = Math.min((prog - 0.4) * 2.5, 1);
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = '#4488ff'; ctx.shadowBlur = 30;
+    ctx.fillStyle   = '#6699ff';
+    ctx.font = 'bold 20px "Courier New"';
+    ctx.textAlign = 'center';
+    transText.split('\n').forEach((line, i) => ctx.fillText(line, BW/2, BH/2 - 10 + i*28));
+    ctx.shadowBlur = 0; ctx.globalAlpha = 1; ctx.textAlign = 'left';
+  }
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(0, 0, BW, BH);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 40;
+  ctx.fillStyle   = '#ff1111'; ctx.font = 'bold 62px "Courier New"';
+  ctx.fillText('YOU FELL', BW/2, BH/2 - 15);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#774444'; ctx.font = '13px "Courier New"';
+  ctx.fillText('all 3 lives consumed by the shadow', BW/2, BH/2 + 22);
+  const pa = 0.55 + Math.sin(frame*0.1)*0.45;
+  ctx.globalAlpha = pa;
+  ctx.fillStyle = '#ff6666'; ctx.font = 'bold 14px "Courier New"';
+  ctx.fillText('[ PRESS SPACE TO RISE AGAIN ]', BW/2, BH/2 + 70);
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+function drawVictory() {
+  ctx.fillStyle = 'rgba(0,0,10,0.82)'; ctx.fillRect(0, 0, BW, BH);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff00ff'; ctx.shadowBlur = 45;
+  ctx.fillStyle   = '#ff44ff'; ctx.font = 'bold 54px "Courier New"';
+  ctx.fillText('SHADOW', BW/2, BH/2 - 65);
+  ctx.fillStyle   = '#ffffff'; ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 20;
+  ctx.fillText('CONQUERED', BW/2, BH/2);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#886699'; ctx.font = '12px "Courier New"';
+  ctx.fillText('You faced what lurked beneath', BW/2, BH/2 + 44);
+  ctx.fillText('and emerged from the darkness', BW/2, BH/2 + 62);
+  const pa = 0.55 + Math.sin(frame*0.09)*0.45;
+  ctx.globalAlpha = pa;
+  ctx.fillStyle   = '#cc88ff'; ctx.font = 'bold 13px "Courier New"';
+  ctx.fillText('[ PRESS SPACE TO PLAY AGAIN ]', BW/2, BH/2 + 108);
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+// Scanline overlay
+function drawScanlines() {
+  ctx.globalAlpha = 0.04;
+  ctx.fillStyle = '#000';
+  for (let y = 0; y < BH; y += 3) ctx.fillRect(0, y, BW, 1);
+  ctx.globalAlpha = 1;
+}
+
+// ── MAIN LOOP ────────────────────────────────────────────────
+function loop() {
+  frame++;
+
+  // Screen shake
+  let sx = 0, sy = 0;
+  if (shk > 0) { sx = rnd(-shkMag, shkMag); sy = rnd(-shkMag, shkMag); shk--; }
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  if (gameState === 'menu') {
+    drawMenu();
+    if (JP['Space'] || JP['Enter']) {
+      currentLevel = 0; buildLevel1(); setState('playing'); levelTimer = 0;
+    }
+
+  } else if (gameState === 'playing') {
+    levelTimer++;
+    tickParts();
+    tickPlayer();
+    tickEnemies();
+
+    drawBG();
+    drawPortal();
+    drawPlatforms();
+    drawParts(camX);
+    enemies.forEach(drawEnemy);
+    if (boss) drawBoss();
+    drawPlayer();
+    drawHUD();
+
+  } else if (gameState === 'transition') {
+    // Keep rendering game behind
+    drawBG(); drawPlatforms();
+    if (boss) drawBoss();
+    drawPlayer();
+    drawTransition();
+
+  } else if (gameState === 'gameover') {
+    drawBG(); drawPlatforms(); drawPlayer();
+    drawGameOver();
+    if (JP['Space']) { currentLevel = 0; buildLevel1(); setState('playing'); levelTimer = 0; }
+
+  } else if (gameState === 'victory') {
+    drawBG();
+    drawVictory();
+    if (JP['Space']) { currentLevel = 0; buildLevel1(); setState('playing'); levelTimer = 0; }
+  }
+
+  drawScanlines();
+  ctx.restore();
+
+  // Clear JP
+  for (const k in JP) delete JP[k];
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
