@@ -289,8 +289,10 @@ function tickPlayer() {
     }
   }
 
-  // Level 0 exit
-  if (currentLevel === 0 && P.x > 3960) nextLevel('UNDERGROUND\nARENA AWAITS');
+  // Level 0 exit — only when player intentionally reaches portal (not knocked there while hurt)
+  if (currentLevel === 0 && P.x > 3940 && P.state !== 'hurt' && P.state !== 'dead' && P.onGround) {
+    nextLevel('UNDERGROUND\nARENA AWAITS');
+  }
 
   // Level 1 wave progress
   if (currentLevel === 1 && enemies.length === 0 && waveDelay === 0) {
@@ -461,7 +463,9 @@ function buildLevel1() {
   addP(1080, 420, 190, 30);
 
   // Low-ceiling slide zone
-  addP( 980, 325, 300, 14);   // ceiling
+  // Fix: ceiling starts at x=1010 (where raised platform ends) to avoid
+  // overlap at x=980-1010 that caused physics double-collision & random death
+  addP(1010, 325, 270, 14);   // ceiling
   addP(1050, 420, 250, 30);   // floor under ceiling
 
   addP(1360, 420, 120, 30);
@@ -470,10 +474,12 @@ function buildLevel1() {
   addP(1870, 230, 90, 18);
 
   addP(2020, 195, 200, 18);
-  // Wall jump section: two walls with a gap
+  // Wall jump section — original route restored
+  // Bug fix: top ledge placed BETWEEN the walls (x=2238 to x=2420) so it
+  // never overlaps a wall corner — eliminates the physics squeeze that caused random death
   addP(2220, 100, 18, 320);   // left wall
   addP(2420, 100, 18, 320);   // right wall
-  addP(2180, 100, 260, 18);   // top ledge
+  addP(2238, 100, 182, 18);   // top ledge (sits between the two walls, no corner overlap)
 
   addP(2500, 310, 120, 18);
   addP(2690, 420, 90, 30);
@@ -489,15 +495,20 @@ function buildLevel1() {
   // Final run
   addP(3580, 420, 500, 30);
 
-  // Safety net
-  addP(-100, 465, 4300, 10);
+  // Safety net — 50px thick to prevent fast-fall tunneling (MAXFALL=16px/frame)
+  addP(-100, 448, 4300, 50);
 
-  // Enemies — just 3, easy and spread out
-  enemies.push(mkEnemy(900, 330, 'runner'));
-  enemies.push(mkEnemy(2020, 370, 'fighter'));
+  // Enemies — original positions
+  enemies.push(mkEnemy(520, 360, 'runner'));
+  enemies.push(mkEnemy(900, 330, 'fighter'));
+  enemies.push(mkEnemy(1400, 400, 'fighter'));
+  enemies.push(mkEnemy(1720, 275, 'runner'));
+  enemies.push(mkEnemy(2510, 400, 'fighter'));
+  enemies.push(mkEnemy(2800, 400, 'fighter'));
   enemies.push(mkEnemy(3300, 310, 'runner'));
+  enemies.push(mkEnemy(3700, 400, 'fighter'));
 
-  P.x = 80; P.y = 390; P.vx = 0; P.vy = 0; P.hp = 100; P.lives = 3; P.state = 'idle';
+  P.x = 80; P.y = 370; P.vx = 0; P.vy = 0; P.hp = 100; P.lives = 3; P.state = 'idle';
   P.iframes = 0; P.hurtTimer = 0; P.atkTimer = 0; P.slideH = false; P.jumps = 0;
   camX = 0; targetCam = 0;
 }
@@ -573,149 +584,459 @@ function nextLevel(txt) {
 
 function drawBG() {
   const t = frame;
+  if (currentLevel === 0) drawBG_City(t);
+  else drawBG_Underground(t);
+}
 
-  // ── Sky / cave gradient changes per level ─────────────────
-  const palettes = [
-    // Level 0: deep tunnel — teal/indigo
-    ['#040d1c','#091830','#0d1f3c','#07122a'],
-    // Level 1: arena — orange magma under blue mist
-    ['#0d0815','#1a0820','#280a12','#100508'],
-    // Level 2: void mirror — deep violet
-    ['#07020f','#10041a','#1c0635','#080118'],
+// ═══ LEVEL 0 — DAYTIME CITY ══════════════════════════════════
+function drawBG_City(t) {
+  // Sky gradient — bright day blue
+  const sky = ctx.createLinearGradient(0, 0, 0, BH);
+  sky.addColorStop(0,    '#5bc8f5');
+  sky.addColorStop(0.45, '#87dcf7');
+  sky.addColorStop(0.75, '#c8eefa');
+  sky.addColorStop(1,    '#d4e8c2');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, BW, BH);
+
+  // ── Sun ────────────────────────────────────────────────
+  const sunX = BW * 0.82, sunY = 55;
+  const sunG = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, 70);
+  sunG.addColorStop(0,   '#fffde0');
+  sunG.addColorStop(0.3, '#ffe97a');
+  sunG.addColorStop(0.7, '#ffcc3388');
+  sunG.addColorStop(1,   'transparent');
+  ctx.fillStyle = sunG; ctx.globalAlpha = 1;
+  ctx.beginPath(); ctx.arc(sunX, sunY, 70, 0, Math.PI*2); ctx.fill();
+  // Sun disc
+  ctx.fillStyle = '#fff8c0';
+  ctx.shadowColor = '#ffe97a'; ctx.shadowBlur = 30;
+  ctx.beginPath(); ctx.arc(sunX, sunY, 22, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // ── Clouds (parallax slow) ─────────────────────────────
+  ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.88;
+  const clouds = [
+    { bx:60,  by:38, rx:55, ry:20, p:0.04 },
+    { bx:280, by:25, rx:70, ry:24, p:0.03 },
+    { bx:520, by:48, rx:45, ry:16, p:0.05 },
+    { bx:700, by:30, rx:60, ry:22, p:0.035},
   ];
-  const pal = palettes[Math.min(currentLevel, 2)];
+  clouds.forEach(c => {
+    const cx2 = ((c.bx - camX * c.p) % (BW + 160) + BW + 160) % (BW + 160) - 80;
+    ctx.beginPath(); ctx.ellipse(cx2, c.by, c.rx, c.ry, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx2 - c.rx*0.4, c.by + c.ry*0.3, c.rx*0.6, c.ry*0.75, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx2 + c.rx*0.4, c.by + c.ry*0.2, c.rx*0.55, c.ry*0.7, 0, 0, Math.PI*2); ctx.fill();
+  });
 
-  const g = ctx.createLinearGradient(0, 0, 0, BH);
-  g.addColorStop(0,   pal[0]);
-  g.addColorStop(0.4, pal[1]);
-  g.addColorStop(0.75,pal[2]);
-  g.addColorStop(1,   pal[3]);
-  ctx.fillStyle = g; ctx.fillRect(0, 0, BW, BH);
-
-  // ── Distant cave walls (far parallax) ────────────────────
-  const wallCol = currentLevel===0 ? '#0d2a42' : currentLevel===1 ? '#2a0a14' : '#1a0530';
+  // ── Far city skyline (very slow parallax) ─────────────
   ctx.globalAlpha = 1;
-  ctx.fillStyle = wallCol;
-  // Left wall blob
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  for (let y = 0; y <= BH; y += 30) {
-    const wx = 28 + Math.sin(y*0.045 + camX*0.02)*18;
-    ctx.lineTo(wx, y);
-  }
-  ctx.lineTo(0, BH); ctx.closePath(); ctx.fill();
-  // Right wall blob
-  ctx.beginPath();
-  ctx.moveTo(BW, 0);
-  for (let y = 0; y <= BH; y += 30) {
-    const wx = BW - 28 - Math.sin(y*0.045 + 2.1 + camX*0.02)*18;
-    ctx.lineTo(wx, y);
-  }
-  ctx.lineTo(BW, BH); ctx.closePath(); ctx.fill();
+  const farBuildings = [
+    { bx:0,   bw:60,  bh:160, col:'#b8ccd8' },
+    { bx:55,  bw:45,  bh:120, col:'#c2d4de' },
+    { bx:96,  bw:70,  bh:190, col:'#adbfcc' },
+    { bx:160, bw:50,  bh:140, col:'#b5c8d5' },
+    { bx:205, bw:80,  bh:200, col:'#a8bcc9' },
+    { bx:278, bw:55,  bh:130, col:'#beccd8' },
+    { bx:326, bw:65,  bh:170, col:'#afc3cf' },
+    { bx:383, bw:45,  bh:145, col:'#b2c5d2' },
+    { bx:420, bw:75,  bh:185, col:'#a6bac7' },
+    { bx:488, bw:55,  bh:125, col:'#bccdd9' },
+    { bx:535, bw:70,  bh:160, col:'#adbfcc' },
+    { bx:598, bw:50,  bh:210, col:'#a4b8c5' },
+    { bx:640, bw:60,  bh:150, col:'#b0c3d0' },
+    { bx:692, bw:80,  bh:175, col:'#a9bdc9' },
+    { bx:764, bw:50,  bh:135, col:'#bdcdd9' },
+  ];
+  farBuildings.forEach(b => {
+    const bx = ((b.bx - camX * 0.06) % (BW+200) + BW+200) % (BW+200) - 100;
+    const by = BH - b.bh;
+    ctx.fillStyle = b.col;
+    ctx.fillRect(bx, by, b.bw, b.bh);
+    // Windows
+    ctx.fillStyle = 'rgba(180,220,255,0.5)';
+    for (let wy = by+8; wy < BH - 12; wy += 16) {
+      for (let wx = bx+5; wx < bx+b.bw-8; wx += 10) {
+        if (Math.sin(wx*7.3 + wy*3.1) > 0.1) ctx.fillRect(wx, wy, 5, 8);
+      }
+    }
+    // Rooftop edge
+    ctx.fillStyle = 'rgba(100,140,160,0.4)';
+    ctx.fillRect(bx, by, b.bw, 3);
+  });
 
-  // ── Glowing rock formations (mid parallax) ───────────────
-  const rockGlow = currentLevel===0 ? '#1a5c8c' : currentLevel===1 ? '#8c2a00' : '#6600aa';
-  const rockBase = currentLevel===0 ? '#0a2a3f' : currentLevel===1 ? '#3f0f00' : '#200040';
-  for (let i = 0; i < 9; i++) {
-    const ox = ((i * 240 - camX * 0.3) % (BW+240) + BW+240) % (BW+240) - 60;
-    const oy = 330 + Math.sin(i*1.9)*50;
-    const rw = 70 + i*12, rh = 55 + Math.sin(i*2.2)*20;
-    // Glow halo
-    const rg = ctx.createRadialGradient(ox, oy, 0, ox, oy, rw);
-    rg.addColorStop(0, rockGlow + '44');
-    rg.addColorStop(1, 'transparent');
-    ctx.fillStyle = rg; ctx.globalAlpha = 0.55;
-    ctx.beginPath(); ctx.ellipse(ox, oy, rw, rh, 0, 0, Math.PI*2); ctx.fill();
-    // Rock body
-    ctx.fillStyle = rockBase; ctx.globalAlpha = 0.9;
-    ctx.beginPath(); ctx.ellipse(ox, oy+10, rw*0.7, rh*0.7, 0, 0, Math.PI*2); ctx.fill();
-  }
+  // ── Mid city buildings (medium parallax) ──────────────
+  const midBuildings = [
+    { bx:20,  bw:55,  bh:130, col:'#445566', wc:'rgba(150,210,255,0.55)' },
+    { bx:70,  bw:40,  bh:100, col:'#3d4f60', wc:'rgba(255,230,130,0.45)' },
+    { bx:106, bw:65,  bh:155, col:'#3a4e5e', wc:'rgba(150,210,255,0.55)' },
+    { bx:165, bw:50,  bh:115, col:'#3f5264', wc:'rgba(255,230,130,0.45)' },
+    { bx:210, bw:75,  bh:165, col:'#374b5a', wc:'rgba(150,210,255,0.55)' },
+    { bx:280, bw:55,  bh:120, col:'#3c5060', wc:'rgba(255,230,130,0.45)' },
+    { bx:330, bw:70,  bh:145, col:'#384c5c', wc:'rgba(150,210,255,0.55)' },
+    { bx:393, bw:45,  bh:110, col:'#405264', wc:'rgba(255,230,130,0.45)' },
+    { bx:432, bw:80,  bh:170, col:'#364a58', wc:'rgba(150,210,255,0.55)' },
+    { bx:505, bw:55,  bh:125, col:'#3b4f5f', wc:'rgba(255,230,130,0.45)' },
+    { bx:554, bw:70,  bh:148, col:'#384c5c', wc:'rgba(150,210,255,0.55)' },
+    { bx:616, bw:50,  bh:115, col:'#3e5262', wc:'rgba(255,230,130,0.45)' },
+    { bx:660, bw:75,  bh:162, col:'#364a59', wc:'rgba(150,210,255,0.55)' },
+    { bx:728, bw:55,  bh:128, col:'#3c5060', wc:'rgba(255,230,130,0.45)' },
+    { bx:776, bw:60,  bh:140, col:'#374b5a', wc:'rgba(150,210,255,0.55)' },
+  ];
+  midBuildings.forEach(b => {
+    const bx = ((b.bx - camX * 0.25) % (BW+200) + BW+200) % (BW+200) - 100;
+    const by = BH - b.bh;
+    ctx.fillStyle = b.col;
+    ctx.fillRect(bx, by, b.bw, b.bh);
+    // Windows grid
+    for (let wy = by+8; wy < BH-14; wy += 14) {
+      for (let wx = bx+5; wx < bx+b.bw-7; wx += 9) {
+        ctx.fillStyle = b.wc;
+        if (Math.sin(wx*5.1 + wy*2.7 + 1.2) > 0) ctx.fillRect(wx, wy, 5, 7);
+      }
+    }
+    // Rooftop detail
+    ctx.fillStyle = 'rgba(80,110,130,0.5)';
+    ctx.fillRect(bx, by, b.bw, 4);
+    // Antenna
+    if (b.bh > 140) {
+      ctx.strokeStyle = 'rgba(80,110,130,0.7)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(bx+b.bw/2, by); ctx.lineTo(bx+b.bw/2, by-18); ctx.stroke();
+      ctx.fillStyle = '#ff4444'; ctx.shadowColor='#ff4444'; ctx.shadowBlur=6;
+      ctx.beginPath(); ctx.arc(bx+b.bw/2, by-18, 2.5, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur=0;
+    }
+  });
 
-  // ── Stalactites with dripping glow ───────────────────────
-  const dripCol = currentLevel===0 ? '#00d4ff' : currentLevel===1 ? '#ff6600' : '#cc00ff';
-  for (let i = 0; i < 14; i++) {
-    const sx = ((i * 140 - camX * 0.5) % (BW+140) + BW+140) % (BW+140) - 20;
-    const sh = 35 + Math.sin(i*2.5)*22;
-    const sw = 9 + Math.sin(i*1.3)*4;
-    // Stone body
-    const sg = ctx.createLinearGradient(sx, 0, sx, sh);
-    sg.addColorStop(0, currentLevel===0?'#1a3d55':currentLevel===1?'#3d1500':'#2a004d');
-    sg.addColorStop(1, dripCol+'88');
-    ctx.fillStyle = sg; ctx.globalAlpha = 0.85;
-    ctx.beginPath();
-    ctx.moveTo(sx - sw, 0); ctx.lineTo(sx + sw, 0);
-    ctx.lineTo(sx + 2, sh); ctx.lineTo(sx - 2, sh);
-    ctx.closePath(); ctx.fill();
-    // Drip drop
-    const dropPulse = Math.abs(Math.sin(t*0.07 + i*0.8));
-    ctx.globalAlpha = 0.7 * dropPulse;
-    ctx.fillStyle = dripCol;
-    ctx.shadowColor = dripCol; ctx.shadowBlur = 10;
-    ctx.beginPath(); ctx.arc(sx, sh + 6*dropPulse, 2.5, 0, Math.PI*2); ctx.fill();
+  // ── Street level: road + pavement ─────────────────────
+  // Sidewalk — starts at y=421 (just below platform top at 420) so player legs are always visible
+  ctx.fillStyle = '#c8bfb0'; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 421, BW, 29);
+  // Road marking dashes
+  ctx.strokeStyle = '#e8e0c8'; ctx.lineWidth = 2; ctx.setLineDash([18,14]);
+  ctx.beginPath(); ctx.moveTo(0, 436); ctx.lineTo(BW, 436); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── Foreground street fixtures ────────────────────────
+  for (let i = 0; i < 6; i++) {
+    const lx = ((i * 200 + 80 - camX * 0.9) % (BW+200) + BW+200) % (BW+200) - 60;
+    // Lamppost
+    ctx.fillStyle = '#2a2e38'; ctx.globalAlpha = 1;
+    ctx.fillRect(lx - 2, 330, 4, 90);
+    ctx.fillRect(lx - 14, 330, 16, 4);
+    // Lamp glow
+    ctx.fillStyle = '#fff8aa'; ctx.shadowColor = '#ffe87a'; ctx.shadowBlur = 18;
+    ctx.beginPath(); ctx.arc(lx - 8, 333, 6, 0, Math.PI*2); ctx.fill();
     ctx.shadowBlur = 0;
   }
 
-  // ── Stalagmites from floor ────────────────────────────────
-  for (let i = 0; i < 10; i++) {
-    const sx = ((i * 180 + 90 - camX * 0.6) % (BW+180) + BW+180) % (BW+180) - 20;
-    const sh = 25 + Math.sin(i*3.1)*15;
-    const sg = ctx.createLinearGradient(sx, BH-sh, sx, BH);
-    sg.addColorStop(0, dripCol + '66');
-    sg.addColorStop(1, currentLevel===0?'#0f2030':currentLevel===1?'#300a00':'#180028');
-    ctx.fillStyle = sg; ctx.globalAlpha = 0.7;
-    ctx.beginPath();
-    ctx.moveTo(sx-6, BH); ctx.lineTo(sx+6, BH);
-    ctx.lineTo(sx+1, BH-sh); ctx.lineTo(sx-1, BH-sh);
-    ctx.closePath(); ctx.fill();
+  // ── Floating city dust / birds ─────────────────────────
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < 6; i++) {
+    const bx2 = ((i * 180 + t * (0.3 + i*0.08) - camX*0.1) % (BW+100) + BW+100) % (BW+100) - 30;
+    const by2 = 60 + Math.sin(t*0.02 + i*1.4) * 20 + i * 22;
+    ctx.fillStyle = '#334455';
+    ctx.globalAlpha = 0.35;
+    // Simple bird silhouette
+    ctx.beginPath(); ctx.moveTo(bx2, by2);
+    ctx.quadraticCurveTo(bx2+5, by2-3, bx2+10, by2);
+    ctx.quadraticCurveTo(bx2+5, by2-1, bx2, by2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ═══ LEVEL 1 & 2 — BENEATH THE SURFACE (Underground City) ════
+function drawBG_Underground(t) {
+  const isArena = currentLevel === 1;
+  // Level 2 = damp sewer/subway tunnel  |  Level 3 = deep forgotten undercity
+
+  // ── 1. BASE — damp concrete / stone backdrop ──────────
+  const baseG = ctx.createLinearGradient(0, 0, 0, BH);
+  if (isArena) {
+    baseG.addColorStop(0,   '#0e0f0c');
+    baseG.addColorStop(0.4, '#141510');
+    baseG.addColorStop(0.8, '#181a14');
+    baseG.addColorStop(1,   '#0c0e0a');
+  } else {
+    baseG.addColorStop(0,   '#070810');
+    baseG.addColorStop(0.4, '#0c0d18');
+    baseG.addColorStop(0.8, '#101220');
+    baseG.addColorStop(1,   '#080910');
+  }
+  ctx.fillStyle = baseG; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 0, BW, BH);
+
+  // ── 2. FAR BACKGROUND WALL — brick / tiled concrete ──
+  const brickDark  = isArena ? '#141612' : '#0f1020';
+  const brickLight = isArena ? '#1e211a' : '#161828';
+  const mortarCol  = isArena ? '#0c0e0a' : '#090a14';
+  // Brick rows (far, slow parallax)
+  const brickH = 22, brickW = 56;
+  for (let row = 0; row < Math.ceil(BH/brickH)+1; row++) {
+    const rowY = row * brickH;
+    const offset = (row % 2) * (brickW / 2);
+    for (let col = -1; col < Math.ceil(BW/brickW)+2; col++) {
+      const bx = ((col * brickW + offset - camX * 0.08) % (BW + brickW*3) + BW + brickW*3) % (BW + brickW*3) - brickW;
+      ctx.fillStyle = (row + col) % 3 === 0 ? brickDark : brickLight;
+      ctx.globalAlpha = 0.85;
+      ctx.fillRect(bx + 1, rowY + 1, brickW - 2, brickH - 2);
+    }
+  }
+  // Mortar grid
+  ctx.strokeStyle = mortarCol; ctx.lineWidth = 1; ctx.globalAlpha = 1;
+  for (let row = 0; row <= Math.ceil(BH/brickH)+1; row++) {
+    ctx.beginPath(); ctx.moveTo(0, row*brickH); ctx.lineTo(BW, row*brickH); ctx.stroke();
   }
 
-  // ── Glowing pipes / tunnel architecture (level 0 & 1) ───
-  if (currentLevel < 2) {
-    const pipeCol = currentLevel===0 ? '#00aaff' : '#ff4400';
-    for (let i = 0; i < 5; i++) {
-      const px = ((i * 310 + 60 - camX * 0.7) % (BW+310) + BW+310) % (BW+310) - 40;
-      const py = 80 + i * 40;
-      ctx.globalAlpha = 0.18;
-      ctx.strokeStyle = pipeCol; ctx.lineWidth = 4;
-      ctx.shadowColor = pipeCol; ctx.shadowBlur = 12;
-      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + 120, py); ctx.stroke();
-      // Rivet dots
-      ctx.fillStyle = pipeCol; ctx.globalAlpha = 0.3;
-      for (let r = 0; r < 3; r++) {
-        ctx.beginPath(); ctx.arc(px + 20 + r*40, py, 3, 0, Math.PI*2); ctx.fill();
-      }
+  // ── 3. CEILING — cracked concrete slab ───────────────
+  const ceilCol  = isArena ? '#1a1c16' : '#12141e';
+  const ceilCol2 = isArena ? '#232620' : '#1a1c2a';
+  const ceilCol3 = isArena ? '#2d3128' : '#22253a';
+
+  // Far slab
+  ctx.fillStyle = ceilCol; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 0, BW, 48);
+  // Mid slab with slight noise
+  ctx.fillStyle = ceilCol2;
+  ctx.beginPath(); ctx.moveTo(0,0);
+  for (let x = 0; x <= BW; x += 12) {
+    const n = Math.sin(x*0.09 + camX*0.008)*5 + Math.sin(x*0.17)*3;
+    ctx.lineTo(x, 36 + n);
+  }
+  ctx.lineTo(BW,0); ctx.closePath(); ctx.fill();
+  // Front slab edge
+  ctx.fillStyle = ceilCol3;
+  ctx.beginPath(); ctx.moveTo(0,0);
+  for (let x = 0; x <= BW; x += 8) {
+    const n = Math.sin(x*0.12 + camX*0.013 + 1.2)*6 + Math.sin(x*0.22)*2;
+    ctx.lineTo(x, 26 + n);
+  }
+  ctx.lineTo(BW,0); ctx.closePath(); ctx.fill();
+
+  // Ceiling concrete cracks
+  ctx.strokeStyle = isArena ? '#3a3d30' : '#2a2d40';
+  ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+  for (let i = 0; i < 8; i++) {
+    const cx2 = ((i * 170 + 40 - camX * 0.13) % (BW+170) + BW+170) % (BW+170) - 30;
+    ctx.beginPath(); ctx.moveTo(cx2, 0);
+    let cy = 0, cxx = cx2;
+    while (cy < 50) { cy += rnd(6,14); cxx += rnd(-8,8); ctx.lineTo(cxx, cy); }
+    ctx.stroke();
+  }
+
+  // Ceiling drips / water stains
+  const dripC = isArena ? '#2a3020' : '#1a2030';
+  for (let i = 0; i < 10; i++) {
+    const dx = ((i * 130 + 60 - camX * 0.2) % (BW+130) + BW+130) % (BW+130) - 20;
+    const dh = 18 + Math.sin(i*2.1)*10;
+    ctx.fillStyle = dripC; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.moveTo(dx-3, 26); ctx.lineTo(dx+3, 26);
+    ctx.lineTo(dx+1, 26+dh); ctx.lineTo(dx-1, 26+dh); ctx.closePath(); ctx.fill();
+    // water droplet
+    const dp = Math.abs(Math.sin(t*0.04 + i*0.9));
+    ctx.fillStyle = isArena ? '#44553a' : '#334466';
+    ctx.shadowColor = isArena ? '#6a8855' : '#4466aa'; ctx.shadowBlur = 5;
+    ctx.globalAlpha = 0.6 * dp;
+    ctx.beginPath(); ctx.arc(dx, 26+dh+4*dp, 2.2, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── 4. STREET GRATE / MANHOLE in ceiling (light leak) ─
+  const gratePositions = [160, 400, 640];
+  gratePositions.forEach((gx, gi) => {
+    const ngx = ((gx - camX * 0.15) % (BW + 200) + BW + 200) % (BW + 200) - 50;
+    // Light shaft coming through
+    const shaftAlpha = 0.12 + Math.sin(t*0.025 + gi)*0.04;
+    const shaftG = ctx.createLinearGradient(ngx, 0, ngx, 180);
+    shaftG.addColorStop(0, isArena ? `rgba(180,200,140,${shaftAlpha*2})` : `rgba(100,120,200,${shaftAlpha*2})`);
+    shaftG.addColorStop(1, 'transparent');
+    ctx.fillStyle = shaftG; ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.moveTo(ngx-18, 0); ctx.lineTo(ngx+18, 0);
+    ctx.lineTo(ngx+30, 180); ctx.lineTo(ngx-30, 180);
+    ctx.closePath(); ctx.fill();
+    // Grate frame
+    ctx.fillStyle = isArena ? '#2a2e22' : '#222232';
+    ctx.globalAlpha = 1;
+    ctx.fillRect(ngx-18, 0, 36, 8);
+    // Grate bars
+    ctx.strokeStyle = isArena ? '#3a3e30' : '#303040';
+    ctx.lineWidth = 2;
+    for (let b = -12; b <= 12; b += 8) {
+      ctx.beginPath(); ctx.moveTo(ngx+b, 0); ctx.lineTo(ngx+b, 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ngx-18, b+14 < 8 ? b+14 : 0); ctx.lineTo(ngx+18, b+14 < 8 ? b+14 : 0); ctx.stroke();
+    }
+  });
+
+  // ── 5. SIDE WALLS — rough concrete / stone ────────────
+  const wallBase  = isArena ? '#191b15' : '#14152a';
+  const wallMid   = isArena ? '#21241c' : '#1c1e30';
+  const wallFront = isArena ? '#2a2e24' : '#24273e';
+
+  // Left wall 3 layers
+  for (let layer = 0; layer < 3; layer++) {
+    const wc = [wallBase, wallMid, wallFront][layer];
+    const spd = layer * 0.012;
+    ctx.fillStyle = wc; ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(0,0);
+    for (let y = 0; y <= BH; y += 10) {
+      const wx = (22 + layer*12) + Math.sin(y*0.05 + camX*spd + layer*1.2)*16 + Math.sin(y*0.12 + layer*0.7)*5;
+      ctx.lineTo(wx, y);
+    }
+    ctx.lineTo(0, BH); ctx.closePath(); ctx.fill();
+  }
+  // Right wall 3 layers
+  for (let layer = 0; layer < 3; layer++) {
+    const wc = [wallBase, wallMid, wallFront][layer];
+    const spd = layer * 0.012;
+    ctx.fillStyle = wc; ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(BW, 0);
+    for (let y = 0; y <= BH; y += 10) {
+      const wx = BW - (22 + layer*12) - Math.sin(y*0.05 + camX*spd + layer*2.1)*16 - Math.sin(y*0.12 + layer*1.0)*5;
+      ctx.lineTo(wx, y);
+    }
+    ctx.lineTo(BW, BH); ctx.closePath(); ctx.fill();
+  }
+
+  // ── 6. PIPES on walls ────────────────────────────────
+  const pipeCol  = isArena ? '#334433' : '#223355';
+  const pipeHigh = isArena ? '#4a6640' : '#334477';
+  const pipeLeak = isArena ? '#66aa44' : '#4466cc';
+  const pipeYs   = [70, 140, 220, 310];
+  pipeYs.forEach((py, pi) => {
+    const px2 = ((pi * 280 + 30 - camX * 0.6) % (BW + 280) + BW + 280) % (BW + 280) - 60;
+    const pw = 120 + pi*20;
+    // Pipe body
+    const pg = ctx.createLinearGradient(px2, py-6, px2, py+6);
+    pg.addColorStop(0, pipeHigh); pg.addColorStop(0.5, pipeCol); pg.addColorStop(1, '#111');
+    ctx.fillStyle = pg; ctx.globalAlpha = 1;
+    ctx.fillRect(px2, py-6, pw, 12);
+    // Pipe bolts
+    ctx.fillStyle = pipeHigh;
+    [px2+8, px2+pw-8].forEach(boltX => {
+      ctx.fillRect(boltX-3, py-8, 6, 16);
+      ctx.fillStyle = '#111'; ctx.fillRect(boltX-1, py-8, 2, 16);
+      ctx.fillStyle = pipeHigh;
+    });
+    // Leak/drip
+    if (pi % 2 === 0) {
+      const lp = Math.abs(Math.sin(t*0.05 + pi*1.4));
+      ctx.fillStyle = pipeLeak; ctx.shadowColor = pipeLeak; ctx.shadowBlur = 6;
+      ctx.globalAlpha = 0.6 * lp;
+      ctx.beginPath(); ctx.arc(px2 + pw*0.6, py + 6 + 10*lp, 2.5, 0, Math.PI*2); ctx.fill();
       ctx.shadowBlur = 0;
+    }
+  });
+
+  // ── 7. FLUORESCENT / BARE BULB LIGHTS ─────────────────
+  const bulbCol  = isArena ? '#c8d8a0' : '#88aadd';
+  const bulbCol2 = isArena ? '#e8f0c0' : '#aaccff';
+  const lightSpacing = 200;
+  for (let i = 0; i < 5; i++) {
+    const lx = ((i * lightSpacing + 50 - camX * 0.7) % (BW + lightSpacing) + BW + lightSpacing) % (BW + lightSpacing) - 30;
+    const flicker = 0.82 + Math.sin(t * (0.11 + i*0.03) + i*2.1) * 0.18;
+    // Fixture tube
+    ctx.fillStyle = '#333'; ctx.globalAlpha = 1;
+    ctx.fillRect(lx - 18, 30, 36, 5);
+    ctx.fillRect(lx - 2, 35, 4, 10);
+    // Light glow cone downward
+    const coneG = ctx.createLinearGradient(lx, 44, lx, 260);
+    coneG.addColorStop(0, `rgba(${isArena?'180,210,120':'120,160,220'},${0.25*flicker})`);
+    coneG.addColorStop(1, 'transparent');
+    ctx.fillStyle = coneG; ctx.globalAlpha = flicker;
+    ctx.beginPath();
+    ctx.moveTo(lx-4, 44); ctx.lineTo(lx+4, 44);
+    ctx.lineTo(lx+90, 260); ctx.lineTo(lx-90, 260);
+    ctx.closePath(); ctx.fill();
+    // Bulb glow
+    ctx.fillStyle = bulbCol2; ctx.shadowColor = bulbCol2; ctx.shadowBlur = 22*flicker;
+    ctx.globalAlpha = flicker;
+    ctx.beginPath(); ctx.arc(lx, 40, 5, 0, Math.PI*2); ctx.fill();
+    // Ambient halo
+    ctx.fillStyle = bulbCol; ctx.shadowColor = bulbCol; ctx.shadowBlur = 35*flicker;
+    ctx.globalAlpha = 0.18 * flicker;
+    ctx.beginPath(); ctx.arc(lx, 40, 35, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── 8. FLOOR — wet concrete / grime ───────────────────
+  const floorCol  = isArena ? '#1a1d15' : '#141620';
+  const floorCol2 = isArena ? '#252820' : '#1e2030';
+  const floorG = ctx.createLinearGradient(0, 410, 0, BH);
+  floorG.addColorStop(0, floorCol); floorG.addColorStop(1, floorCol2);
+  ctx.fillStyle = floorG; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 410, BW, BH-410);
+  // Floor tile grouting lines
+  ctx.strokeStyle = isArena ? '#111310' : '#10111a'; ctx.lineWidth = 1; ctx.globalAlpha = 0.6;
+  for (let tx2 = 0; tx2 < BW; tx2 += 48) {
+    const tfx = ((tx2 - camX * 0.9) % (BW+48) + BW+48) % (BW+48) - 24;
+    ctx.beginPath(); ctx.moveTo(tfx, 410); ctx.lineTo(tfx, BH); ctx.stroke();
+  }
+  for (let ty = 415; ty < BH; ty += 28) {
+    ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(BW, ty); ctx.stroke();
+  }
+  // Wet puddle reflection shimmer
+  const wetCol = isArena ? '#3a4a2a' : '#2a3050';
+  for (let i = 0; i < 4; i++) {
+    const wx2 = ((i * 250 + 90 - camX * 0.85) % (BW+250) + BW+250) % (BW+250) - 50;
+    const ws  = 50 + Math.sin(i*1.7)*20;
+    const pulseW = 0.5 + Math.sin(t*0.04+i*1.3)*0.3;
+    ctx.fillStyle = wetCol; ctx.globalAlpha = 0.35 * pulseW;
+    ctx.beginPath(); ctx.ellipse(wx2, 430, ws, 7, 0, 0, Math.PI*2); ctx.fill();
+    // highlight
+    ctx.fillStyle = isArena ? '#8aaa6a' : '#6688cc';
+    ctx.globalAlpha = 0.12 * pulseW;
+    ctx.beginPath(); ctx.ellipse(wx2, 428, ws*0.5, 3, 0, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ── 9. GRAFFITI / MARKINGS on walls (level 2 only) ───
+  if (isArena) {
+    const tags = ['SHADOW', '▼', '?', '⚠'];
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = '#88cc44';
+    ctx.font = 'bold 13px "Courier New"';
+    tags.forEach((tag, i) => {
+      const tx2 = ((i * 270 + 15 - camX * 0.55) % (BW+270) + BW+270) % (BW+270) - 40;
+      ctx.fillText(tag, tx2, 200 + i*28);
+    });
+  } else {
+    // Level 3: ancient runes carved into wall
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = '#4455aa'; ctx.lineWidth = 1.5;
+    for (let i = 0; i < 5; i++) {
+      const rx2 = ((i * 220 + 20 - camX * 0.5) % (BW+220) + BW+220) % (BW+220) - 40;
+      ctx.beginPath(); ctx.arc(rx2, 190 + i*18, 8, 0, Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx2-8, 190+i*18); ctx.lineTo(rx2+8, 190+i*18); ctx.stroke();
     }
   }
 
-  // ── Floating dust / embers ────────────────────────────────
-  const emberCol = currentLevel===0 ? '#44bbff' : currentLevel===1 ? '#ff8844' : '#cc44ff';
-  for (let i = 0; i < 18; i++) {
-    const ex = (Math.sin(t*0.003 + i*2.3)*0.5 + 0.5) * BW;
-    const ey = (Math.cos(t*0.005 + i*1.8)*0.5 + 0.5) * BH;
-    const er = 1.2 + Math.sin(t*0.012+i)*0.8;
-    ctx.globalAlpha = 0.25 + Math.sin(t*0.011+i)*0.15;
-    ctx.fillStyle = emberCol;
-    ctx.shadowColor = emberCol; ctx.shadowBlur = 8;
-    ctx.beginPath(); ctx.arc(ex, ey, er, 0, Math.PI*2); ctx.fill();
-    ctx.shadowBlur = 0;
-  }
+  // ── 10. TOP VIGNETTE — oppressive ceiling dark ────────
+  const topVig = ctx.createLinearGradient(0, 0, 0, 80);
+  topVig.addColorStop(0, isArena ? 'rgba(5,6,4,0.98)' : 'rgba(3,4,10,0.98)');
+  topVig.addColorStop(1, 'transparent');
+  ctx.fillStyle = topVig; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 0, BW, 80);
 
-  // ── Ground fog layer ────────────────────────────────────
-  const fogG = ctx.createLinearGradient(0, 360, 0, BH);
-  const fogCol = currentLevel===0 ? 'rgba(0,80,160,' : currentLevel===1 ? 'rgba(120,30,0,' : 'rgba(60,0,100,';
-  fogG.addColorStop(0, fogCol+'0)');
-  fogG.addColorStop(0.5, fogCol+'0.12)');
-  fogG.addColorStop(1, fogCol+'0.25)');
-  ctx.fillStyle = fogG; ctx.globalAlpha = 1;
-  ctx.fillRect(0, 360, BW, BH-360);
+  // ── 11. AMBIENT FOG MID-DEPTH ─────────────────────────
+  const midFog = ctx.createLinearGradient(0, 140, 0, 380);
+  midFog.addColorStop(0, 'transparent');
+  midFog.addColorStop(0.4, isArena ? 'rgba(20,28,14,0.22)' : 'rgba(10,14,28,0.25)');
+  midFog.addColorStop(1, 'transparent');
+  ctx.fillStyle = midFog; ctx.globalAlpha = 1;
+  ctx.fillRect(0, 140, BW, 240);
 
   ctx.globalAlpha = 1;
 }
 
+
 function drawPlatforms() {
-  const edgeCols = ['#00ccff','#ff6600','#cc44ff'];
-  const topFills = [['#0d2a44','#071422'],['#3a1000','#1a0800'],['#200040','#0d0020']];
+  // Level 0: city concrete/metal  |  Level 1: underground sewer  |  Level 2: deep undercity
+  const edgeCols = ['#aabbcc', '#88aa66', '#6688cc'];
+  const topFills = [
+    ['#6a7a88','#4a5a68'],   // level 0 – concrete slab
+    ['#2a3022','#1a2016'],   // level 1 – mossy stone slab
+    ['#1e2230','#141828'],   // level 2 – dark stone
+  ];
   const ec = edgeCols[Math.min(currentLevel,2)];
   const tf = topFills[Math.min(currentLevel,2)];
   for (const p of platforms) {
@@ -724,14 +1045,24 @@ function drawPlatforms() {
     const g = ctx.createLinearGradient(0, p.y, 0, p.y+p.h);
     g.addColorStop(0, tf[0]); g.addColorStop(1, tf[1]);
     ctx.fillStyle = g; ctx.fillRect(sx, p.y, p.w, p.h);
+    // Side edge
     ctx.strokeStyle = ec + '44'; ctx.lineWidth = 1;
     ctx.strokeRect(sx, p.y, p.w, p.h);
-    ctx.shadowColor = ec; ctx.shadowBlur = 8;
-    ctx.strokeStyle = ec; ctx.lineWidth = 1.5;
+    // Glowing top edge
+    ctx.shadowColor = ec; ctx.shadowBlur = currentLevel===0 ? 4 : 10;
+    ctx.strokeStyle = ec; ctx.lineWidth = currentLevel===0 ? 2.5 : 1.5;
     ctx.beginPath(); ctx.moveTo(sx, p.y); ctx.lineTo(sx+p.w, p.y); ctx.stroke();
     ctx.shadowBlur = 0;
-    ctx.fillStyle = ec + 'bb';
-    [sx+3, sx+p.w-6].forEach(bx => ctx.fillRect(bx, p.y+2, 4, 4));
+    // Corner bolts / rivets
+    ctx.fillStyle = ec + 'cc';
+    [sx+3, sx+p.w-7].forEach(bx => ctx.fillRect(bx, p.y+2, 5, 5));
+    // Level 0 — concrete texture lines
+    if (currentLevel === 0) {
+      ctx.strokeStyle = 'rgba(80,95,110,0.3)'; ctx.lineWidth = 1;
+      for (let lx = sx+20; lx < sx+p.w-10; lx += 25) {
+        ctx.beginPath(); ctx.moveTo(lx, p.y); ctx.lineTo(lx, p.y+p.h); ctx.stroke();
+      }
+    }
   }
 }
 
@@ -1115,34 +1446,38 @@ function drawHUD() {
 function drawMenu() {
   const t = frame;
 
-  // BG — deep underground cave
+  // BG — city at dusk/night intro
   const mg = ctx.createLinearGradient(0, 0, 0, BH);
-  mg.addColorStop(0,   '#040d1c');
-  mg.addColorStop(0.5, '#091830');
-  mg.addColorStop(1,   '#050d22');
+  mg.addColorStop(0,   '#0a1628');
+  mg.addColorStop(0.4, '#152035');
+  mg.addColorStop(0.75,'#1e2a3a');
+  mg.addColorStop(1,   '#0d1520');
   ctx.fillStyle = mg; ctx.fillRect(0, 0, BW, BH);
 
-  // Cave stalactites
-  for (let i = 0; i < 12; i++) {
-    const sx = (i * 145 + t*0.15) % (BW + 80) - 20;
-    const sh = 30 + Math.sin(i*2.1)*18;
-    const sg = ctx.createLinearGradient(sx, 0, sx, sh);
-    sg.addColorStop(0, '#0d2a42'); sg.addColorStop(1, '#00aaff66');
-    ctx.fillStyle = sg; ctx.globalAlpha = 0.5;
-    ctx.beginPath(); ctx.moveTo(sx-7,0); ctx.lineTo(sx+7,0); ctx.lineTo(sx+2,sh); ctx.lineTo(sx-2,sh); ctx.closePath(); ctx.fill();
-    ctx.fillStyle='#00ccff'; ctx.globalAlpha=0.3*Math.abs(Math.sin(t*0.06+i));
-    ctx.shadowColor='#00ccff'; ctx.shadowBlur=8;
-    ctx.beginPath(); ctx.arc(sx,sh+4*Math.abs(Math.sin(t*0.06+i)),2,0,Math.PI*2); ctx.fill();
-    ctx.shadowBlur=0;
+  // City silhouette
+  ctx.fillStyle = '#0d1825'; ctx.globalAlpha = 1;
+  const menuBuilds = [0,80,55,120,65,90,145,50,185,75,240,55,295,100,365,60,410,85,475,50,520,110,600,65,645,90,700,55,740,80];
+  for (let i = 0; i < menuBuilds.length; i+=3) {
+    const mbx = menuBuilds[i], mbw = menuBuilds[i+1]||55, mbh = menuBuilds[i+2]||90;
+    ctx.fillRect(mbx, BH-mbh, mbw, mbh);
+    // Window lights
+    ctx.fillStyle = 'rgba(255,220,120,0.3)';
+    for (let wy = BH-mbh+8; wy < BH-12; wy+=14) {
+      for (let wx = mbx+5; wx < mbx+mbw-7; wx+=9) {
+        if (Math.sin(wx*4.7+wy*2.3)>0.2) ctx.fillRect(wx, wy, 5, 7);
+      }
+    }
+    ctx.fillStyle = '#0d1825';
   }
 
-  // Ambient parallax rocks
-  ctx.globalAlpha = 0.12;
-  ctx.fillStyle = '#0a1d30';
-  for (let i = 0; i < 8; i++) {
-    ctx.beginPath();
-    ctx.arc((i*150 + t*0.2)%(BW+100)-50, 380+Math.sin(i*1.4)*40, 70+i*10, 0, Math.PI*2);
-    ctx.fill();
+  // Stalactites on ceiling as cave intro
+  for (let i = 0; i < 12; i++) {
+    const sx = (i * 145 + t*0.12) % (BW + 80) - 20;
+    const sh = 28 + Math.sin(i*2.1)*16;
+    const sg = ctx.createLinearGradient(sx, 0, sx, sh);
+    sg.addColorStop(0, '#0a1525'); sg.addColorStop(1, '#00aaff44');
+    ctx.fillStyle = sg; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.moveTo(sx-6,0); ctx.lineTo(sx+6,0); ctx.lineTo(sx+2,sh); ctx.lineTo(sx-2,sh); ctx.closePath(); ctx.fill();
   }
   ctx.globalAlpha = 1;
 
